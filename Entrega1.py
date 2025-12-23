@@ -9,7 +9,7 @@ file_path = "GovernmentBondPrices_UnitedStates.xlsx"
 df = pd.read_excel(file_path)
 
 # --------------------------------------------------
-# 2. Normalizar nombres de columnas
+# 2. Normalizar nombres de columnas Prueba
 # --------------------------------------------------
 df = df.rename(columns={
     "Cpn": "Coupon_rate",
