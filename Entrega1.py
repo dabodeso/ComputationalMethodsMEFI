@@ -98,4 +98,4 @@ clean_df.reset_index(drop=True, inplace=True)
 # --------------------------------------------------
 # 8. Resultado
 # --------------------------------------------------
-print(clean_df.head())
+print(clean_df)
