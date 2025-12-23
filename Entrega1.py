@@ -34,10 +34,10 @@ UNICODE_FRACTIONS = {
 def us_price_to_decimal(price):
     """
     Convierte precios tipo '99*19⅝' a decimal.
-    STRIPS y T-Bills ya vienen en decimal.
+    Si el precio ya viene en decimal (Bills / STRIPS), lo devuelve tal cual.
     """
     if isinstance(price, (int, float)):
-        return price
+        return float(price)
 
     try:
         main, frac = price.split('*')
@@ -54,13 +54,50 @@ def us_price_to_decimal(price):
     except Exception:
         return np.nan
 
+
 df["Bid_clean"] = df["Bid"].apply(us_price_to_decimal)
 df["Ask_clean"] = df["Ask"].apply(us_price_to_decimal)
 
+def normalize_coupon(coupon):
+    """
+    Normaliza el cupón para que SIEMPRE esté en porcentaje.
+    Ej:
+    3.5     -> 3.5
+    3.5%    -> 3.5
+    0.035   -> 3.5
+    """
+    if pd.isna(coupon):
+        return np.nan
+
+    # Si viene como string, limpiar %
+    if isinstance(coupon, str):
+        coupon = coupon.strip().replace('%', '')
+
+    try:
+        coupon = float(coupon)
+    except ValueError:
+        return np.nan
+
+    # Si está en formato decimal, convertir a %
+    if coupon <= 1:
+        coupon *= 100
+
+    return coupon
+
+
+df["Coupon_rate"] = df["Coupon_rate"].apply(normalize_coupon)
+
+
 # --------------------------------------------------
-# 4. Precio mid
+# 4. Valor cotizado (precio o yield)
 # --------------------------------------------------
-df["Price_mid"] = (df["Bid_clean"] + df["Ask_clean"]) / 2
+df["Quoted_value"] = (df["Bid_clean"] + df["Ask_clean"]) / 2
+
+df["Quote_type"] = np.where(
+    df["Instrument_Type"] == "STR",
+    "Yield",   # Bills / STR cotizan en yield
+    "Price"    # Notes / Bonds cotizan en precio
+)
 
 # --------------------------------------------------
 # 5. Fechas y tiempo a vencimiento
@@ -80,22 +117,24 @@ df["Instrument_class"] = np.where(
     "Coupon"
 )
 
-# --------------------------------------------------
-# 7. Limpieza final
-# --------------------------------------------------
 clean_df = df[[
     "RIC",
     "Name",
     "Instrument_Type",
     "Coupon_rate",
-    "Price_mid",
+    "Quoted_value",
+    "Quote_type",
     "T",
     "Instrument_class"
 ]].dropna()
+
 
 clean_df.reset_index(drop=True, inplace=True)
 
 # --------------------------------------------------
 # 8. Resultado
 # --------------------------------------------------
+#pd.set_option("display.max_columns", None)
+#pd.set_option("display.width", None)
+
 print(clean_df)
