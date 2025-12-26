@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import re
+import matplotlib.pyplot as plt
 
 # --------------------------------------------------
 # 1. Cargar datos
@@ -87,16 +88,52 @@ def normalize_coupon(coupon):
 
 df["Coupon_rate"] = df["Coupon_rate"].apply(normalize_coupon)
 
-
 # --------------------------------------------------
-# 4. Valor cotizado (precio o yield)
+# 4. Detección correcta: precio vs yield
 # --------------------------------------------------
-df["Quoted_value"] = (df["Bid_clean"] + df["Ask_clean"]) / 2
 
+def detect_quote_type(x):
+    """
+    Detecta automáticamente si la cotización es precio o yield.
+    """
+    if isinstance(x, str) and '*' in x:
+        return "Price"        # formato 32avos
+    try:
+        val = float(x)
+        if val < 30:          # yields suelen ser 0–10 aprox.
+            return "Yield"
+        else:
+            return "Price"
+    except:
+        return np.nan
+
+
+df["Bid_type"] = df["Bid"].apply(detect_quote_type)
+df["Ask_type"] = df["Ask"].apply(detect_quote_type)
+
+# Si cualquiera de las dos columnas indica yield → tratamos como yield
 df["Quote_type"] = np.where(
-    df["Instrument_Type"] == "STR",
-    "Yield",   # Bills / STR cotizan en yield
-    "Price"    # Notes / Bonds cotizan en precio
+    (df["Bid_type"] == "Yield") | (df["Ask_type"] == "Yield"),
+    "Yield",
+    "Price"
+)
+
+# --------------------------------------------------
+# 4.1 Calcular el valor limpio según tipo
+# --------------------------------------------------
+
+# Para precios → usamos la función de conversión correcta
+df.loc[df["Quote_type"] == "Price", "Quoted_value"] = (
+    df.loc[df["Quote_type"] == "Price", ["Bid", "Ask"]]
+      .applymap(us_price_to_decimal)
+      .mean(axis=1)
+)
+
+# Para yields → promedio directo como yield %
+df.loc[df["Quote_type"] == "Yield", "Quoted_value"] = (
+    df.loc[df["Quote_type"] == "Yield", ["Bid", "Ask"]]
+      .astype(float)
+      .mean(axis=1)
 )
 
 # --------------------------------------------------
@@ -138,105 +175,108 @@ clean_df.reset_index(drop=True, inplace=True)
 #pd.set_option("display.width", None)
 
 print(clean_df)
+
 # --------------------------------------------------
-# 9. Task 1 – Método 1: OLS (Ordinary Least Squares)
+# 9. Task 1 – OLS sobre SPOT RATES (según enunciado)
 # --------------------------------------------------
-# Calibración del modelo Nelson–Siegel mediante OLS.
-# Estrategia correcta:
-# 1) OLS sobre yields SOLO con bonos zero-coupon
-# 2) Búsqueda en rejilla sobre λ
-# 3) Selección del λ que minimiza el error EN PRECIOS
+# Reglas:
+# - ZEROS → spot exacto (continuo)
+# - CUPONES → YTM continuo como proxy del spot
+# - Ajustamos Nelson–Siegel con OLS sobre los spots
 
 import numpy as np
-
-# --------------------------------------------------
-# 9.1 Modelo Nelson–Siegel (tipos spot)
-# --------------------------------------------------
-
-def nelson_siegel_rate(T, beta0, beta1, beta2, lambd):
-    term1 = (1 - np.exp(-lambd * T)) / (lambd * T)
-    term2 = term1 - np.exp(-lambd * T)
-    return beta0 + beta1 * term1 + beta2 * term2
+from scipy.optimize import brentq
 
 
-# --------------------------------------------------
-# 9.2 Factores de descuento
-# --------------------------------------------------
+# ------------------------ 9.1 Nelson–Siegel ------------------------
 
-def discount_factor_ns(T, beta0, beta1, beta2, lambd):
-    r = nelson_siegel_rate(T, beta0, beta1, beta2, lambd)
-    return np.exp(-r * T)
+def ns_terms(T, lam):
+    f1 = (1 - np.exp(-lam * T)) / (lam * T)
+    f2 = f1 - np.exp(-lam * T)
+    return f1, f2
+
+def nelson_siegel_rate(T, beta0, beta1, beta2, lam):
+    f1, f2 = ns_terms(T, lam)
+    return beta0 + beta1 * f1 + beta2 * f2
 
 
-# --------------------------------------------------
-# 9.3 Precio de un bono (pagos semestrales)
-# --------------------------------------------------
+# ------------------------ 9.2 Spot de ZERO-coupon ------------------------
 
-def bond_price_ns(T, coupon_rate, beta0, beta1, beta2, lambd):
-    face_value = 100
+def spot_from_zero(price, T):
+    # DF = price / 100  →  r = - ln(DF) / T
+    DF = price / 100.0
+    return -np.log(DF) / T
+
+
+# ------------------------ 9.3 YTM continuo (proxy spot) ------------------------
+
+def ytm_continuous(price, coupon_rate, T):
+    face = 100
     freq = 2
+    c = face * coupon_rate / 100 / freq
 
-    n_periods = int(np.round(T * freq))
-    coupon = face_value * coupon_rate / 100 / freq
+    # función de valoración con descuento continuo
+    def f(r):
+        pv = 0.0
+        for k in range(1, int(np.round(T * freq)) + 1):
+            t = k / freq
+            pv += c * np.exp(-r * t)
+        pv += face * np.exp(-r * T)
+        return pv - price
 
-    price = 0.0
-    for i in range(1, n_periods + 1):
-        t_i = i / freq
-        df = discount_factor_ns(t_i, beta0, beta1, beta2, lambd)
-        price += coupon * df
-
-    df_T = discount_factor_ns(T, beta0, beta1, beta2, lambd)
-    price += face_value * df_T
-
-    return price
+    # buscamos r entre -50% y 50%
+    return brentq(f, -0.5, 0.5)
 
 
-# --------------------------------------------------
-# 9.4 OLS con búsqueda en rejilla para λ
-# --------------------------------------------------
+# ------------------------ 9.4 Construimos la curva de SPOT ------------------------
 
-lambda_grid = np.linspace(0.1, 10.0, 150)
+spots = []
+
+for _, row in clean_df.iterrows():
+    T = row["T"]
+    price = row["Quoted_value"]
+    coup = row["Coupon_rate"]
+
+    if row["Instrument_class"] == "Zero":
+        r = spot_from_zero(price, T)
+
+    else:   # bono con cupón
+        r = ytm_continuous(price, coup, T)
+
+    spots.append(r)
+
+clean_df["Spot"] = spots
+
+
+# ------------------------ 9.5 OLS + grid search sobre λ ------------------------
+
+lambda_grid = np.linspace(0.1, 5.0, 80)
 
 best_sse = np.inf
 best_params = None
 
-# SOLO zero-coupon para la regresión
-zeros = clean_df[clean_df["Instrument_class"] == "Zero"]
-zeros = zeros[(zeros["T"] > 0.1) & (zeros["T"] < 25)]
-
 for lam in lambda_grid:
 
     X = []
-    y_yield = []
+    y = []
 
-    # --- OLS sobre ZEROS (yields correctos) ---
-    for _, row in zeros.iterrows():
+    for _, row in clean_df.iterrows():
         T = row["T"]
+        spot = row["Spot"]
 
-        f1 = 1.0
-        f2 = (1 - np.exp(-lam * T)) / (lam * T)
-        f3 = f2 - np.exp(-lam * T)
+        f1, f2 = ns_terms(T, lam)
 
-        X.append([f1, f2, f3])
-
-        DF = row["Quoted_value"] / 100
-        y = -np.log(DF) / T
-        y_yield.append(y)
+        X.append([1.0, f1, f2])
+        y.append(spot)
 
     X = np.array(X)
-    y_yield = np.array(y_yield)
+    y = np.array(y)
 
-    beta, _, _, _ = np.linalg.lstsq(X, y_yield, rcond=None)
-    b0, b1, b2 = beta
+    betas, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+    b0, b1, b2 = betas
 
-    # --- SSE sobre TODOS los bonos (precio) ---
-    sse = 0.0
-    for _, row in clean_df.iterrows():
-        price_model = bond_price_ns(
-            row["T"], row["Coupon_rate"],
-            b0, b1, b2, lam
-        )
-        sse += (price_model - row["Quoted_value"])**2
+    spot_fit = nelson_siegel_rate(clean_df["T"], b0, b1, b2, lam)
+    sse = np.sum((y - spot_fit) ** 2)
 
     if sse < best_sse:
         best_sse = sse
@@ -246,37 +286,43 @@ beta0_ols, beta1_ols, beta2_ols, best_lam = best_params
 sse_ols = best_sse
 
 
-# --------------------------------------------------
-# 9.5 Curva OLS estimada
-# --------------------------------------------------
+# ------------------------ 9.6 Construimos la CURVA DE YIELDS ------------------------
 
-T_grid = np.linspace(0.25, clean_df["T"].max(), 200)
+T_grid = np.linspace(0.1, clean_df["T"].max(), 200)
 
-spot_ols = nelson_siegel_rate(
+spot_curve_ols = nelson_siegel_rate(
     T_grid,
     beta0_ols, beta1_ols, beta2_ols, best_lam
 )
 
 ols_curve = pd.DataFrame({
     "T": T_grid,
-    "Spot_Rate_OLS": spot_ols
+    "Spot_OLS": spot_curve_ols
 })
 
 
-# --------------------------------------------------
-# 9.6 Presentación de resultados (formato informe)
-# --------------------------------------------------
+# ------------------------ 9.7 Resultados ------------------------
 
 print("\n" + "="*50)
 print("        Nelson–Siegel Calibration Results")
 print("="*50)
 
-print("\n[ OLS with Lambda Grid Search ]")
+print("\n[ OLS — Spot-based (consistent with assignment) ]")
 print(f"  • beta₀ (level)     : {beta0_ols:>10.6f}")
 print(f"  • beta₁ (slope)     : {beta1_ols:>10.6f}")
 print(f"  • beta₂ (curvature) : {beta2_ols:>10.6f}")
 print(f"  • λ (decay factor)  : {best_lam:>10.6f}")
-print(f"  • SSE               : {sse_ols:>10.6e}")
+print(f"  • SSE (spots)       : {sse_ols:>10.6e}")
 
 print("="*50 + "\n")
 
+
+# ------------------------ 9.8 Plot ------------------------
+
+plt.figure(figsize=(8,5))
+plt.plot(ols_curve["T"], 100 * ols_curve["Spot_OLS"])
+plt.xlabel("Maturity (years)")
+plt.ylabel("Spot rate (%)")
+plt.title("Nelson–Siegel — OLS on Spot Rates")
+plt.grid(True)
+plt.show()
