@@ -138,3 +138,145 @@ clean_df.reset_index(drop=True, inplace=True)
 #pd.set_option("display.width", None)
 
 print(clean_df)
+# --------------------------------------------------
+# 9. Task 1 – Método 1: OLS (Ordinary Least Squares)
+# --------------------------------------------------
+# Calibración del modelo Nelson–Siegel mediante OLS.
+# Estrategia correcta:
+# 1) OLS sobre yields SOLO con bonos zero-coupon
+# 2) Búsqueda en rejilla sobre λ
+# 3) Selección del λ que minimiza el error EN PRECIOS
+
+import numpy as np
+
+# --------------------------------------------------
+# 9.1 Modelo Nelson–Siegel (tipos spot)
+# --------------------------------------------------
+
+def nelson_siegel_rate(T, beta0, beta1, beta2, lambd):
+    term1 = (1 - np.exp(-lambd * T)) / (lambd * T)
+    term2 = term1 - np.exp(-lambd * T)
+    return beta0 + beta1 * term1 + beta2 * term2
+
+
+# --------------------------------------------------
+# 9.2 Factores de descuento
+# --------------------------------------------------
+
+def discount_factor_ns(T, beta0, beta1, beta2, lambd):
+    r = nelson_siegel_rate(T, beta0, beta1, beta2, lambd)
+    return np.exp(-r * T)
+
+
+# --------------------------------------------------
+# 9.3 Precio de un bono (pagos semestrales)
+# --------------------------------------------------
+
+def bond_price_ns(T, coupon_rate, beta0, beta1, beta2, lambd):
+    face_value = 100
+    freq = 2
+
+    n_periods = int(np.round(T * freq))
+    coupon = face_value * coupon_rate / 100 / freq
+
+    price = 0.0
+    for i in range(1, n_periods + 1):
+        t_i = i / freq
+        df = discount_factor_ns(t_i, beta0, beta1, beta2, lambd)
+        price += coupon * df
+
+    df_T = discount_factor_ns(T, beta0, beta1, beta2, lambd)
+    price += face_value * df_T
+
+    return price
+
+
+# --------------------------------------------------
+# 9.4 OLS con búsqueda en rejilla para λ
+# --------------------------------------------------
+
+lambda_grid = np.linspace(0.1, 10.0, 150)
+
+best_sse = np.inf
+best_params = None
+
+# SOLO zero-coupon para la regresión
+zeros = clean_df[clean_df["Instrument_class"] == "Zero"]
+zeros = zeros[(zeros["T"] > 0.1) & (zeros["T"] < 25)]
+
+for lam in lambda_grid:
+
+    X = []
+    y_yield = []
+
+    # --- OLS sobre ZEROS (yields correctos) ---
+    for _, row in zeros.iterrows():
+        T = row["T"]
+
+        f1 = 1.0
+        f2 = (1 - np.exp(-lam * T)) / (lam * T)
+        f3 = f2 - np.exp(-lam * T)
+
+        X.append([f1, f2, f3])
+
+        DF = row["Quoted_value"] / 100
+        y = -np.log(DF) / T
+        y_yield.append(y)
+
+    X = np.array(X)
+    y_yield = np.array(y_yield)
+
+    beta, _, _, _ = np.linalg.lstsq(X, y_yield, rcond=None)
+    b0, b1, b2 = beta
+
+    # --- SSE sobre TODOS los bonos (precio) ---
+    sse = 0.0
+    for _, row in clean_df.iterrows():
+        price_model = bond_price_ns(
+            row["T"], row["Coupon_rate"],
+            b0, b1, b2, lam
+        )
+        sse += (price_model - row["Quoted_value"])**2
+
+    if sse < best_sse:
+        best_sse = sse
+        best_params = (b0, b1, b2, lam)
+
+beta0_ols, beta1_ols, beta2_ols, best_lam = best_params
+sse_ols = best_sse
+
+
+# --------------------------------------------------
+# 9.5 Curva OLS estimada
+# --------------------------------------------------
+
+T_grid = np.linspace(0.25, clean_df["T"].max(), 200)
+
+spot_ols = nelson_siegel_rate(
+    T_grid,
+    beta0_ols, beta1_ols, beta2_ols, best_lam
+)
+
+ols_curve = pd.DataFrame({
+    "T": T_grid,
+    "Spot_Rate_OLS": spot_ols
+})
+
+
+# --------------------------------------------------
+# 9.6 Presentación de resultados (formato informe)
+# --------------------------------------------------
+
+print("\n" + "="*50)
+print("        Nelson–Siegel Calibration Results")
+print("="*50)
+
+print("\n[ OLS with Lambda Grid Search ]")
+print(f"  • beta₀ (level)     : {beta0_ols:>10.6f}")
+print(f"  • beta₁ (slope)     : {beta1_ols:>10.6f}")
+print(f"  • beta₂ (curvature) : {beta2_ols:>10.6f}")
+print(f"  • λ (decay factor)  : {best_lam:>10.6f}")
+print(f"  • SSE               : {sse_ols:>10.6e}")
+
+print("="*50 + "\n")
+
