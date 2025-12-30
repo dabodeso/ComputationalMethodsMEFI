@@ -1,0 +1,539 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{margin=2.5cm}
+
+\title{Reconstrucción de la Curva de Tipos de Interés mediante Bootstrapping y Modelo Nelson-Siegel}
+\author{Análisis de Bonos del Tesoro de Estados Unidos}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introducción}
+
+Este documento presenta la metodología para reconstruir la curva de tipos de interés (ETTI - Estructura Temporal de Tipos de Interés) a partir de cotizaciones de mercado de bonos del Tesoro de Estados Unidos. El proceso consta de dos etapas principales:
+
+\begin{enumerate}
+    \item \textbf{Bootstrapping}: Construcción de la curva spot a partir de precios de mercado de bonos zero-coupon y bonos con cupón.
+    \item \textbf{Calibración Nelson-Siegel}: Ajuste de una curva paramétrica suave a los datos observados mediante diferentes métodos de optimización.
+\end{enumerate}
+
+\section{Preparación de los Datos}
+
+\subsection{Conversión de Precios US (Formato 32nds)}
+
+Los bonos con cupón del Tesoro de Estados Unidos cotizan en formato de puntos y treintaidosavos. La conversión a formato decimal se realiza mediante:
+
+\begin{equation}
+P_{decimal} = P_{entero} + \frac{P_{32avos} + P_{fracción}}{32}
+\end{equation}
+
+donde $P_{fracción}$ puede tomar valores como 0, $\frac{1}{4}$, $\frac{1}{2}$, $\frac{3}{4}$, etc.
+
+\textbf{Ejemplos:}
+\begin{itemize}
+    \item $99*19 = 99 + \frac{19}{32} = 99.59375$
+    \item $98*28\frac{3}{4} = 98 + \frac{28.75}{32} = 98.8984$
+\end{itemize}
+
+\subsection{Clasificación de Instrumentos}
+
+Los instrumentos se clasifican en:
+\begin{itemize}
+    \item \textbf{Zero-coupon}: Bonos con cupón igual a 0\%
+    \item \textbf{Con cupón}: Bonos con cupón mayor a 0\%
+\end{itemize}
+
+Esta clasificación es fundamental ya que el proceso de bootstrapping difiere según el tipo de instrumento.
+
+\section{Bootstrapping de la Curva Spot}
+
+El bootstrapping es un método iterativo que construye la curva de tasas spot a partir de los precios de mercado. El proceso depende del tipo de instrumento y de cómo esté cotizado (precio o yield).
+
+\subsection{Bonos Zero-Coupon}
+
+Para bonos zero-coupon, la relación entre precio y spot rate es directa.
+
+\subsubsection{Cotización en Yield}
+
+Si el bono está cotizado en yield (YTM), el spot rate se obtiene directamente:
+
+\begin{equation}
+r(T) = \frac{YTM}{100}
+\end{equation}
+
+donde $YTM$ está expresado en porcentaje.
+
+\subsubsection{Cotización en Precio}
+
+Si el bono está cotizado en precio, el spot rate se calcula mediante capitalización continua:
+
+\begin{equation}
+P = 100 \cdot e^{-r(T) \cdot T}
+\end{equation}
+
+Despejando el spot rate:
+
+\begin{equation}
+r(T) = -\frac{\ln(P/100)}{T}
+\end{equation}
+
+donde:
+\begin{itemize}
+    \item $P$ es el precio del bono (normalizado a base 100)
+    \item $T$ es el tiempo hasta vencimiento en años
+    \item $r(T)$ es el spot rate continuo para el vencimiento $T$
+\end{itemize}
+
+\subsection{Bonos con Cupón}
+
+Para bonos con cupón, el proceso es más complejo y requiere el uso de spots previamente calculados.
+
+\subsubsection{Cotización en Yield}
+
+Según el enunciado del caso, para bonos con cupón cotizados en yield, utilizamos el YTM directamente como proxy del spot rate:
+
+\begin{equation}
+r(T) = \frac{YTM}{100}
+\end{equation}
+
+Esta aproximación es razonable cuando la curva es relativamente plana o cuando no disponemos de suficientes puntos para hacer bootstrapping iterativo.
+
+\subsubsection{Cotización en Precio: Bootstrapping Iterativo}
+
+Para bonos con cupón cotizados en precio, aplicamos bootstrapping iterativo. El precio de un bono con cupón semestral se puede expresar como:
+
+\begin{equation}
+P = \sum_{k=1}^{n} c \cdot e^{-r(t_k) \cdot t_k} + F \cdot e^{-r(T) \cdot T}
+\end{equation}
+
+donde:
+\begin{itemize}
+    \item $P$ es el precio del bono
+    \item $c$ es el cupón semestral: $c = \frac{F \cdot C}{2}$, donde $F$ es el valor facial (100) y $C$ es la tasa de cupón anual
+    \item $n$ es el número de pagos de cupón: $n = \lfloor T \cdot freq \rfloor$, donde $freq = 2$ (semestral)
+    \item $t_k = \frac{k}{freq}$ es el tiempo del $k$-ésimo pago de cupón
+    \item $r(t_k)$ es el spot rate para el tiempo $t_k$
+    \item $T$ es el tiempo hasta vencimiento
+    \item $F$ es el valor facial (100)
+\end{itemize}
+
+Separando el último flujo (último cupón + principal) de los cupones intermedios:
+
+\begin{equation}
+P = \sum_{k=1}^{n-1} c \cdot e^{-r(t_k) \cdot t_k} + (F + c) \cdot e^{-r(T) \cdot T}
+\end{equation}
+
+Definiendo el valor presente de los cupones conocidos:
+
+\begin{equation}
+\text{PV}_{cupones} = \sum_{k=1}^{n-1} c \cdot e^{-r(t_k) \cdot t_k}
+\end{equation}
+
+donde $r(t_k)$ se obtiene mediante interpolación de los spots previamente calculados.
+
+El precio del último flujo es:
+
+\begin{equation}
+P - \text{PV}_{cupones} = (F + c) \cdot e^{-r(T) \cdot T}
+\end{equation}
+
+Despejando el spot rate para el vencimiento $T$:
+
+\begin{equation}
+r(T) = -\frac{\ln\left(\frac{P - \text{PV}_{cupones}}{F + c}\right)}{T}
+\end{equation}
+
+\textbf{Proceso iterativo:}
+\begin{enumerate}
+    \item Ordenar los bonos por vencimiento (de menor a mayor)
+    \item Para cada bono con cupón:
+    \begin{enumerate}
+        \item Calcular $\text{PV}_{cupones}$ usando spots interpolados de bonos con vencimientos anteriores
+        \item Calcular $r(T)$ usando la ecuación (9)
+        \item Guardar el nuevo spot rate
+    \end{enumerate}
+\end{enumerate}
+
+\subsection{Interpolación de Spots}
+
+Para calcular el valor presente de cupones intermedios, necesitamos interpolar spots para vencimientos que no están directamente observados. Utilizamos interpolación lineal:
+
+\begin{equation}
+r(t) = \begin{cases}
+r(T_1) & \text{si } t \leq T_1 \\
+r(T_1) + \frac{r(T_2) - r(T_1)}{T_2 - T_1} \cdot (t - T_1) & \text{si } T_1 < t < T_2 \\
+r(T_n) & \text{si } t \geq T_n
+\end{cases}
+\end{equation}
+
+donde $T_1$ y $T_2$ son los vencimientos más cercanos a $t$, y $T_n$ es el vencimiento máximo observado.
+
+\section{Modelo Nelson-Siegel}
+
+El modelo Nelson-Siegel es una parametrización de la curva de tipos de interés que permite representar la estructura temporal mediante una función suave y económicamente interpretable.
+
+\subsection{Formulación del Modelo}
+
+El modelo Nelson-Siegel parametriza la curva de tipos de interés mediante:
+
+\begin{equation}
+y(\tau) = \beta_0 + \beta_1 \cdot f_1(\tau) + \beta_2 \cdot f_2(\tau)
+\end{equation}
+
+donde las funciones de carga son:
+
+\begin{equation}
+f_1(\tau) = \frac{1 - e^{-\tau/\lambda}}{\tau/\lambda}
+\end{equation}
+
+\begin{equation}
+f_2(\tau) = f_1(\tau) - e^{-\tau/\lambda} = \frac{1 - e^{-\tau/\lambda}}{\tau/\lambda} - e^{-\tau/\lambda}
+\end{equation}
+
+\subsection{Interpretación de los Parámetros}
+
+\begin{itemize}
+    \item \textbf{$\beta_0$ (Level)}: Representa el nivel asintótico de la curva, es decir, la tasa de interés de largo plazo. Cuando $\tau \to \infty$, $f_1(\tau) \to 0$ y $f_2(\tau) \to 0$, por lo que $y(\tau) \to \beta_0$.
+    
+    \item \textbf{$\beta_1$ (Slope)}: Captura la pendiente de la curva, representando la diferencia entre las tasas de corto y largo plazo. Cuando $\tau \to 0$, $f_1(\tau) \to 1$ y $f_2(\tau) \to 0$, por lo que $y(0) = \beta_0 + \beta_1$. Por tanto, $\beta_1 = y(0) - \beta_0$.
+    
+    \item \textbf{$\beta_2$ (Curvature)}: Describe la curvatura o "joroba" en el medio plazo de la curva. La función $f_2(\tau)$ forma un hump (primero aumenta, luego disminuye), permitiendo modelar movimientos en el medio plazo.
+    
+    \item \textbf{$\lambda$ (Decay)}: Controla la velocidad de decaimiento de las funciones $f_1$ y $f_2$. Valores mayores de $\lambda$ hacen que el decaimiento sea más lento, afectando dónde se produce el máximo de curvatura.
+\end{itemize}
+
+\subsection{Propiedades Matemáticas}
+
+\subsubsection{Límites}
+
+\begin{align}
+\lim_{\tau \to 0} f_1(\tau) &= \lim_{\tau \to 0} \frac{1 - e^{-\tau/\lambda}}{\tau/\lambda} = 1 \\
+\lim_{\tau \to \infty} f_1(\tau) &= 0 \\
+\lim_{\tau \to 0} f_2(\tau) &= 0 \\
+\lim_{\tau \to \infty} f_2(\tau) &= 0
+\end{align}
+
+Estos límites justifican la interpretación de los parámetros $\beta_0$ y $\beta_1$.
+
+\subsubsection{Linealidad en $\beta$, No Linealidad en $\lambda$}
+
+El modelo es \textbf{lineal en los parámetros $\beta$} pero \textbf{no lineal en $\lambda$}. Esto tiene implicaciones importantes para la estimación:
+
+\begin{itemize}
+    \item Para un $\lambda$ fijo, el modelo se puede escribir en forma matricial: $\mathbf{y} = \mathbf{X}\boldsymbol{\beta} + \mathbf{u}$
+    \item Los parámetros $\beta$ se pueden estimar mediante mínimos cuadrados ordinarios (OLS)
+    \item El parámetro $\lambda$ requiere métodos de optimización no lineal
+\end{itemize}
+
+\section{Métodos de Calibración}
+
+Presentamos tres métodos para calibrar el modelo Nelson-Siegel, cada uno con sus ventajas y limitaciones.
+
+\subsection{Método 1: OLS con Grid Search sobre $\lambda$}
+
+\subsubsection{Justificación del Método}
+
+Dado que el modelo es lineal en $\beta$ pero no lineal en $\lambda$, transformamos el problema no lineal en una secuencia de problemas lineales:
+
+\begin{enumerate}
+    \item Fijamos un valor de $\lambda$ en un rango razonable (grid search)
+    \item Para cada $\lambda$, el modelo se vuelve lineal en $\beta$
+    \item Estimamos $\beta$ mediante OLS
+    \item Seleccionamos el $\lambda$ que minimiza el error
+\end{enumerate}
+
+\subsubsection{Formulación Matricial}
+
+Para un $\lambda$ fijo, el modelo se puede escribir como:
+
+\begin{equation}
+\begin{bmatrix}
+y(\tau_1) \\
+y(\tau_2) \\
+\vdots \\
+y(\tau_n)
+\end{bmatrix}
+=
+\begin{bmatrix}
+1 & f_1(\tau_1) & f_2(\tau_1) \\
+1 & f_1(\tau_2) & f_2(\tau_2) \\
+\vdots & \vdots & \vdots \\
+1 & f_1(\tau_n) & f_2(\tau_n)
+\end{bmatrix}
+\begin{bmatrix}
+\beta_0 \\
+\beta_1 \\
+\beta_2
+\end{bmatrix}
++
+\begin{bmatrix}
+u(\tau_1) \\
+u(\tau_2) \\
+\vdots \\
+u(\tau_n)
+\end{bmatrix}
+\end{equation}
+
+En forma compacta:
+
+\begin{equation}
+\mathbf{y} = \mathbf{X}\boldsymbol{\beta} + \mathbf{u}
+\end{equation}
+
+donde:
+\begin{itemize}
+    \item $\mathbf{y}$ es el vector de spots observados
+    \item $\mathbf{X} = [\mathbf{1}, \mathbf{f}_1, \mathbf{f}_2]$ es la matriz de diseño
+    \item $\boldsymbol{\beta} = [\beta_0, \beta_1, \beta_2]^T$ son los parámetros a estimar
+    \item $\mathbf{u}$ es el vector de errores
+\end{itemize}
+
+\subsubsection{Solución OLS}
+
+La solución de mínimos cuadrados ordinarios es:
+
+\begin{equation}
+\hat{\boldsymbol{\beta}} = (\mathbf{X}^T\mathbf{X})^{-1}\mathbf{X}^T\mathbf{y}
+\end{equation}
+
+Esta solución existe y es única siempre que $\mathbf{X}^T\mathbf{X}$ sea invertible, lo cual se cumple si las columnas de $\mathbf{X}$ son linealmente independientes.
+
+\subsubsection{Algoritmo}
+
+\begin{enumerate}
+    \item Definir un grid de valores para $\lambda$: $\lambda \in [\lambda_{min}, \lambda_{max}]$ con $N$ puntos
+    \item Para cada $\lambda_i$ en el grid:
+    \begin{enumerate}
+        \item Calcular $f_1(\tau_j, \lambda_i)$ y $f_2(\tau_j, \lambda_i)$ para todos los vencimientos $\tau_j$
+        \item Construir la matriz $\mathbf{X}_i$
+        \item Calcular $\hat{\boldsymbol{\beta}}_i = (\mathbf{X}_i^T\mathbf{X}_i)^{-1}\mathbf{X}_i^T\mathbf{y}$
+        \item Calcular el error: $\text{SSE}_i = \sum_{j=1}^{n} (y_j - \hat{y}_j)^2$
+    \end{enumerate}
+    \item Seleccionar $\lambda^* = \arg\min_{\lambda_i} \text{SSE}_i$ y su correspondiente $\hat{\boldsymbol{\beta}}^*$
+\end{enumerate}
+
+\subsubsection{Ventajas y Desventajas}
+
+\textbf{Ventajas:}
+\begin{itemize}
+    \item Transforma un problema no lineal en una secuencia de problemas lineales
+    \item Robusto y estable
+    \item No requiere punto inicial
+    \item Garantiza encontrar el mínimo global dentro del grid
+\end{itemize}
+
+\textbf{Desventajas:}
+\begin{itemize}
+    \item Computacionalmente costoso si el grid es muy fino
+    \item La precisión de $\lambda$ está limitada por la granularidad del grid
+    \item No optimiza $\lambda$ de forma continua
+\end{itemize}
+
+\subsection{Método 2: Levenberg-Marquardt}
+
+\subsubsection{Justificación del Método}
+
+El método Levenberg-Marquardt (LM) es un algoritmo híbrido que combina:
+\begin{itemize}
+    \item \textbf{Método de Gauss-Newton}: Rápido cuando el modelo está cerca de ser lineal
+    \item \textbf{Gradiente descendente}: Más estable cuando Gauss-Newton falla
+\end{itemize}
+
+A diferencia del método OLS, LM optimiza \textbf{todos los parámetros simultáneamente}, incluyendo $\lambda$.
+
+\subsubsection{Formulación del Problema}
+
+Minimizamos la suma de errores al cuadrado:
+
+\begin{equation}
+\min_{\boldsymbol{\theta}} \quad \text{SSE}(\boldsymbol{\theta}) = \sum_{i=1}^{n} [y_i - y(\tau_i, \boldsymbol{\theta})]^2
+\end{equation}
+
+donde $\boldsymbol{\theta} = [\beta_0, \beta_1, \beta_2, \lambda]^T$ es el vector de parámetros.
+
+\subsubsection{Algoritmo Levenberg-Marquardt}
+
+El algoritmo actualiza los parámetros mediante:
+
+\begin{equation}
+\boldsymbol{\theta}^{(k+1)} = \boldsymbol{\theta}^{(k)} - (\mathbf{J}^T\mathbf{J} + \mu \mathbf{I})^{-1} \mathbf{J}^T \mathbf{r}
+\end{equation}
+
+donde:
+\begin{itemize}
+    \item $\mathbf{J}$ es la matriz jacobiana de los residuos: $J_{ij} = \frac{\partial r_i}{\partial \theta_j}$
+    \item $\mathbf{r}$ es el vector de residuos: $r_i = y_i - y(\tau_i, \boldsymbol{\theta})$
+    \item $\mu$ es el parámetro de regularización (se ajusta dinámicamente)
+\end{itemize}
+
+Cuando $\mu \to 0$, el método se comporta como Gauss-Newton. Cuando $\mu \to \infty$, se comporta como gradiente descendente.
+
+\subsubsection{Punto Inicial}
+
+Utilizamos la solución OLS como punto inicial:
+
+\begin{equation}
+\boldsymbol{\theta}^{(0)} = [\hat{\beta}_0^{OLS}, \hat{\beta}_1^{OLS}, \hat{\beta}_2^{OLS}, \lambda^*]
+\end{equation}
+
+Esto garantiza una buena convergencia ya que OLS proporciona una solución cercana al óptimo.
+
+\subsubsection{Ventajas y Desventajas}
+
+\textbf{Ventajas:}
+\begin{itemize}
+    \item Optimiza todos los parámetros simultáneamente
+    \item Puede encontrar soluciones mejores que el grid search
+    \item Más eficiente computacionalmente que un grid fino
+    \item Optimiza $\lambda$ de forma continua
+\end{itemize}
+
+\textbf{Desventajas:}
+\begin{itemize}
+    \item Requiere un buen punto inicial (que proporciona OLS)
+    \item Puede quedar atrapado en mínimos locales
+    \item Más complejo de implementar
+\end{itemize}
+
+\subsection{Método 3: Optimización Restringida (L-BFGS-B)}
+
+\subsubsection{Justificación del Método}
+
+El método L-BFGS-B (Limited-memory Broyden–Fletcher–Goldfarb–Shanno with Bounds) permite imponer \textbf{restricciones} a los parámetros, lo cual es útil cuando queremos garantizar que los parámetros estén en rangos económicamente razonables.
+
+\subsubsection{Formulación del Problema}
+
+\begin{equation}
+\begin{aligned}
+\min_{\boldsymbol{\theta}} \quad & \text{SSE}(\boldsymbol{\theta}) \\
+\text{sujeto a} \quad & \boldsymbol{\theta}_{min} \leq \boldsymbol{\theta} \leq \boldsymbol{\theta}_{max}
+\end{aligned}
+\end{equation}
+
+donde las restricciones típicas son:
+\begin{align}
+0.0 &\leq \beta_0 \leq 0.1 \quad \text{(tasas entre 0\% y 10\%)} \\
+-0.1 &\leq \beta_1 \leq 0.1 \\
+-0.1 &\leq \beta_2 \leq 0.1 \\
+0.1 &\leq \lambda \leq 10.0
+\end{align}
+
+\subsubsection{Punto Inicial}
+
+A diferencia de LM, el punto inicial se basa en valores observados de la curva:
+
+\begin{align}
+\beta_0^{(0)} &= r(T_{max}) \quad \text{(spot rate de largo plazo)} \\
+\beta_1^{(0)} &= r(T_{min}) - r(T_{max}) \quad \text{(diferencia corto-largo)} \\
+\beta_2^{(0)} &= 0 \quad \text{(sin curvatura inicial)} \\
+\lambda^{(0)} &= 2.0 \quad \text{(valor típico)}
+\end{align}
+
+\subsubsection{Algoritmo L-BFGS-B}
+
+L-BFGS-B es una variante de memoria limitada del algoritmo BFGS que:
+\begin{itemize}
+    \item Aproxima la matriz hessiana usando información de gradientes anteriores
+    \item Respetar las restricciones de bounds mediante proyección
+    \item Es eficiente para problemas de gran dimensión
+\end{itemize}
+
+\subsubsection{Ventajas y Desventajas}
+
+\textbf{Ventajas:}
+\begin{itemize}
+    \item Permite imponer restricciones económicamente razonables
+    \item Evita soluciones no económicas
+    \item Útil cuando tenemos conocimiento previo sobre los parámetros
+\end{itemize}
+
+\textbf{Desventajas:}
+\begin{itemize}
+    \item Depende fuertemente del punto inicial
+    \item Puede quedar atrapado en mínimos locales
+    \item Las restricciones pueden ser demasiado restrictivas
+\end{itemize}
+
+\section{Comparación de Métodos}
+
+\subsection{Criterios de Comparación}
+
+Los métodos se comparan mediante:
+
+\begin{enumerate}
+    \item \textbf{Suma de Errores al Cuadrado (SSE)}:
+    \begin{equation}
+    \text{SSE} = \sum_{i=1}^{n} (y_i - \hat{y}_i)^2
+    \end{equation}
+    
+    \item \textbf{Interpretabilidad económica} de los parámetros
+    
+    \item \textbf{Robustez} y estabilidad numérica
+    
+    \item \textbf{Eficiencia computacional}
+\end{enumerate}
+
+\subsection{Justificación de la Selección}
+
+En general:
+\begin{itemize}
+    \item \textbf{OLS con Grid Search} es el método más robusto y estable, transformando el problema no lineal en una secuencia de problemas lineales. Es recomendable como método base.
+    
+    \item \textbf{Levenberg-Marquardt} puede proporcionar mejoras marginales sobre OLS, optimizando todos los parámetros simultáneamente. Es útil cuando se busca el mejor ajuste posible.
+    
+    \item \textbf{L-BFGS-B} es útil cuando se quieren imponer restricciones económicas o cuando se tienen valores observados confiables para inicializar.
+\end{itemize}
+
+La selección del método preferido debe basarse en:
+\begin{enumerate}
+    \item El objetivo del análisis (precisión vs. robustez)
+    \item La calidad de los datos
+    \item Los requisitos de interpretabilidad económica
+    \item Las restricciones computacionales
+\end{enumerate}
+
+\section{Conclusiones}
+
+Este documento ha presentado la metodología completa para reconstruir la curva de tipos de interés mediante:
+
+\begin{enumerate}
+    \item \textbf{Bootstrapping iterativo} que construye la curva spot a partir de precios de mercado, diferenciando entre bonos zero-coupon y con cupón, y entre cotizaciones en precio y yield.
+    
+    \item \textbf{Modelo Nelson-Siegel} que parametriza la curva mediante cuatro parámetros con interpretación económica clara.
+    
+    \item \textbf{Tres métodos de calibración} (OLS, LM, L-BFGS-B) cada uno con sus ventajas y aplicaciones específicas.
+\end{enumerate}
+
+La metodología presentada es robusta, bien fundamentada matemáticamente, y permite obtener curvas de tipos de interés suaves y económicamente interpretables a partir de datos de mercado reales.
+
+\section{Referencias}
+
+\begin{itemize}
+    \item Nelson, C. R., \& Siegel, A. F. (1987). Parsimonious modeling of yield curves. \textit{Journal of Business}, 60(4), 473-489.
+    
+    \item Diebold, F. X., \& Li, C. (2006). Forecasting the term structure of government bond yields. \textit{Journal of Econometrics}, 130(2), 337-364.
+    
+    \item Levenberg, K. (1944). A method for the solution of certain non-linear problems in least squares. \textit{Quarterly of Applied Mathematics}, 2(2), 164-168.
+    
+    \item Marquardt, D. W. (1963). An algorithm for least-squares estimation of nonlinear parameters. \textit{Journal of the Society for Industrial and Applied Mathematics}, 11(2), 431-441.
+\end{itemize}
+
+\end{document}
+
